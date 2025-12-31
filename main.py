@@ -7,8 +7,8 @@ from aiogram.enums import ParseMode
 
 
 from data.config import BOT_TOKEN
-from middlewares.admin import AdminMiddleware
 from middlewares.album import AlbumMiddleware
+from filters.admin import AdminFilter
 from handlers import base, posting, callbacks, admin
 from utils.scheduler import start_scheduler
 
@@ -18,8 +18,11 @@ async def main():
     bot = Bot(token=BOT_TOKEN, default=bot_properties)
     dp = Dispatcher(storage=MemoryStorage())
 
+    # Global Filters
+    dp.message.filter(AdminFilter())
+    dp.callback_query.filter(AdminFilter())
+
     # Middleware
-    dp.update.middleware(AdminMiddleware())
     dp.message.middleware(AlbumMiddleware())
 
     # Routers
