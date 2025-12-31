@@ -9,6 +9,7 @@ from aiogram.enums import ParseMode
 from data.config import BOT_TOKEN
 from middlewares.album import AlbumMiddleware
 from filters.admin import AdminFilter
+from filters.subscription import SubscriptionFilter
 from handlers import base, posting, callbacks, admin
 from utils.scheduler import start_scheduler
 
@@ -21,6 +22,10 @@ async def main():
     # Global Filters
     dp.message.filter(AdminFilter())
     dp.callback_query.filter(AdminFilter())
+    
+    # Subscription Check (After Admin check)
+    dp.message.filter(SubscriptionFilter())
+    dp.callback_query.filter(SubscriptionFilter())
 
     # Middleware
     dp.message.middleware(AlbumMiddleware())

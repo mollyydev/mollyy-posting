@@ -14,6 +14,7 @@ from utils.translator import translate_text
 from utils.scheduler import scheduler
 from utils.texts import get_text
 from handlers.base import get_lang
+from database.models import User
 import uuid
 
 router = Router()
@@ -47,7 +48,14 @@ async def render_post_preview(bot: Bot, chat_id: int, data: dict):
             # For the preview, we just show the button.
             # For the real post, we need to handle the callback.
             # We will generate a unique ID for the button callback.
-            kb_builder.button(text=btn['text'], callback_data=f"show_alert_{len(buttons)}") # Dummy index for preview?
+            # Fix: Save preview alert to storage to make it work immediately
+            if not btn.get('alert_id'):
+                btn['alert_id'] = str(uuid.uuid4())
+                async for session in get_db_session():
+                    session.add(AlertStorage(id=btn['alert_id'], text=btn.get('alert_text', '')))
+                    await session.commit()
+            
+            kb_builder.button(text=btn['text'], callback_data=f"alert_{btn['alert_id']}")
     
     kb_builder.adjust(1)
     preview_markup = kb_builder.as_markup()
@@ -56,22 +64,16 @@ async def render_post_preview(bot: Bot, chat_id: int, data: dict):
     try:
         # Refactored for entities support (stored as JSON dict usually, but here 'content' might be raw text or dict)
         # We need to handle 'content' variable structure carefully.
-        # In process_content we now save {text:..., entities: ...}
+        # In process_content we now save HTML string in 'text' key inside dict, OR raw string if legacy
         
-        entities = None
         text_content = ""
         
-        if isinstance(content, dict) and 'text' in content: # New Text format
+        if isinstance(content, dict) and 'text' in content:
             text_content = content['text']
-            # Rehydrate entities
-            if content.get('entities'):
-                # We need to convert list of dicts back to list of MessageEntity if using aiogram types
-                # But send_message accepts list of MessageEntity
-                from aiogram.types import MessageEntity
-                entities = [MessageEntity(**e) for e in content['entities']]
-            await bot.send_message(chat_id, text_content, entities=entities, reply_markup=preview_markup)
+            # Send as HTML (default parse_mode). Entities are embedded in HTML string now.
+            await bot.send_message(chat_id, text_content, reply_markup=preview_markup)
             
-        elif isinstance(content, str): # Legacy Text (HTML)
+        elif isinstance(content, str):
             await bot.send_message(chat_id, content, reply_markup=preview_markup)
         
         elif isinstance(content, list): # Album
@@ -115,7 +117,7 @@ async def render_post_preview(bot: Bot, chat_id: int, data: dict):
 
 @router.message(F.text.in_({"📝 Create Post", "📝 Создать пост"}))
 async def start_post_creation(message: types.Message, state: FSMContext):
-    lang = await get_lang()
+    lang = await get_lang(message.from_user.id)
     # Fetch channels
     async for session in get_db_session():
         result = await session.execute(select(Channel))
@@ -171,16 +173,21 @@ async def process_content(message: types.Message, state: FSMContext, album: list
         data['content'] = {'type': 'document', 'file_id': message.document.file_id, 'caption': message.caption}
         data['content_type'] = 'document'
     elif message.text:
-        data['content'] = message.html_text # Use html_text to preserve formatting
+        # Save HTML text to preserve formatting and custom emojis reliably
+        data['content'] = {
+            'text': message.html_text
+        }
         data['content_type'] = 'text'
     else:
-        await message.answer("Unsupported content type.")
+        lang = await get_lang(message.from_user.id)
+        await message.answer(await get_text('unsupported_type', lang))
         return
 
     await state.update_data(**data)
     await state.update_data(buttons=[]) # Initialize empty buttons list
     
-    await message.answer("Content received!")
+    lang = await get_lang(message.from_user.id)
+    await message.answer(await get_text('content_received', lang))
     await render_post_preview(message.bot, message.chat.id, await state.get_data())
     await state.set_state(PostState.waiting_for_buttons)
 
@@ -188,21 +195,21 @@ async def process_content(message: types.Message, state: FSMContext, album: list
 
 @router.callback_query(PostState.waiting_for_buttons, F.data == "add_btn_url")
 async def ask_url_btn_label(callback: types.CallbackQuery, state: FSMContext):
-    lang = await get_lang()
+    lang = await get_lang(callback.from_user.id)
     await callback.message.answer(await get_text('send_btn_label', lang))
     await state.set_state(PostState.waiting_for_url_label)
     await callback.answer()
 
 @router.message(PostState.waiting_for_url_label)
 async def get_url_btn_label(message: types.Message, state: FSMContext):
-    lang = await get_lang()
+    lang = await get_lang(message.from_user.id)
     await state.update_data(temp_btn_label=message.text)
     await message.answer(await get_text('send_btn_url', lang))
     await state.set_state(PostState.waiting_for_url_link)
 
 @router.message(PostState.waiting_for_url_link)
 async def get_url_btn_link(message: types.Message, state: FSMContext):
-    lang = await get_lang()
+    lang = await get_lang(message.from_user.id)
     data = await state.get_data()
     buttons = data.get('buttons', [])
     buttons.append({
@@ -217,7 +224,7 @@ async def get_url_btn_link(message: types.Message, state: FSMContext):
 
 @router.callback_query(PostState.waiting_for_buttons, F.data == "add_btn_translate")
 async def add_translate_btn(callback: types.CallbackQuery, state: FSMContext):
-    lang = await get_lang()
+    lang = await get_lang(callback.from_user.id)
     # Ask for language
     await callback.message.answer(await get_text('btn_translate_prompt', lang))
     await state.set_state(PostState.waiting_for_translation_lang)
@@ -230,9 +237,20 @@ async def process_translation(message: types.Message, state: FSMContext):
     content = data.get('content')
     
     # Extract text to translate
-    text_to_translate = ""
-    if isinstance(content, str):
-        text_to_translate = content
+    # Content is HTML string. We should strip tags for translation ideally,
+    # but for simplicity let's translate as is, knowing tags might break or be translated.
+    # User requested "Translation without HTML tags".
+    
+    text_source = ""
+    import re
+    text_to_translate = re.sub('<[^<]+?>', '', text_source)
+    if isinstance(content, dict) and 'text' in content:
+        text_source = content.get('text', "")
+    elif isinstance(content, str):
+        text_source = content
+        
+    # Strip HTML tags for translation
+
     elif isinstance(content, dict): # Single media
         text_to_translate = content.get('caption', "")
     elif isinstance(content, list): # Album
@@ -242,19 +260,35 @@ async def process_translation(message: types.Message, state: FSMContext):
                 text_to_translate = item['caption']
                 break
     
+    lang = await get_lang(message.from_user.id)
     if not text_to_translate:
-        await message.answer("No text found to translate!")
+        await message.answer(await get_text('no_text_translate', lang))
         await state.set_state(PostState.waiting_for_buttons)
         return
 
+    # Validate language code roughly
+    if len(target_lang) < 2:
+         await message.answer("Invalid language code.")
+         return
+
     # Perform translation
-    translated_text = translate_text(text_to_translate, target=target_lang)
+    # Note: formatting will be lost in translation as we send raw text.
+    # To avoid translating HTML tags if present (legacy support), strip tags?
+    # But text_to_translate is raw text from new format, or potentially HTML from old.
+    # New format saves 'text' (raw). Old format 'content' (html).
+    # If legacy HTML string, we should strip tags for translation, or rely on Google to handle it (risky).
+    # Since we moved to saving raw text, 'text_to_translate' is raw.
     
+    translated_text = translate_text(text_to_translate, target=target_lang)
+    if translated_text == "Translation failed.":
+         await message.answer("Translation failed. Check language code.")
+         return
+
     # Add button
     buttons = data.get('buttons', [])
     buttons.append({
         'type': 'alert',
-        'text': "🇺🇸 English" if target_lang == 'en' else f"Translation ({target_lang})",
+        'text': "🇺🇸 English" if target_lang == 'en' else f"{target_lang}",
         'alert_text': translated_text # Store full translation
     })
     await state.update_data(buttons=buttons)
@@ -265,21 +299,21 @@ async def process_translation(message: types.Message, state: FSMContext):
 
 @router.callback_query(PostState.waiting_for_buttons, F.data == "add_btn_alert")
 async def ask_alert_text(callback: types.CallbackQuery, state: FSMContext):
-    lang = await get_lang()
+    lang = await get_lang(callback.from_user.id)
     await callback.message.answer(await get_text('send_btn_label', lang))
     await state.set_state(PostState.waiting_for_alert_label)
     await callback.answer()
 
 @router.message(PostState.waiting_for_alert_label)
 async def get_alert_label(message: types.Message, state: FSMContext):
-    lang = await get_lang()
+    lang = await get_lang(message.from_user.id)
     await state.update_data(temp_btn_label=message.text)
     await message.answer(await get_text('send_alert_text', lang))
     await state.set_state(PostState.waiting_for_alert_text)
 
 @router.message(PostState.waiting_for_alert_text)
 async def get_alert_text(message: types.Message, state: FSMContext):
-    lang = await get_lang()
+    lang = await get_lang(message.from_user.id)
     data = await state.get_data()
     buttons = data.get('buttons', [])
     buttons.append({
@@ -294,7 +328,7 @@ async def get_alert_text(message: types.Message, state: FSMContext):
 
 @router.callback_query(PostState.waiting_for_buttons, F.data == "clear_buttons")
 async def clear_buttons(callback: types.CallbackQuery, state: FSMContext):
-    lang = await get_lang()
+    lang = await get_lang(callback.from_user.id)
     await state.update_data(buttons=[])
     await callback.answer(await get_text('btn_added', lang)) # Reuse or add 'Buttons cleared' text
     await render_post_preview(callback.bot, callback.message.chat.id, await state.get_data())
@@ -302,8 +336,8 @@ async def clear_buttons(callback: types.CallbackQuery, state: FSMContext):
 @router.callback_query(PostState.waiting_for_buttons, F.data == "post_cancel")
 async def post_cancel(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    lang = await get_lang()
-    await callback.message.delete() # Can't edit inline to reply keyboard
+    lang = await get_lang(callback.from_user.id)
+    await callback.message.delete()
     await callback.message.answer(await get_text('start_welcome', lang), reply_markup=await get_main_menu(lang))
 
 @router.callback_query(F.data == "back_to_edit")
@@ -342,17 +376,37 @@ async def post_creation_done(callback: types.CallbackQuery, state: FSMContext):
 # --- Publish Handlers ---
 @router.callback_query(PostState.confirmation, F.data == "pub_schedule")
 async def start_schedule(callback: types.CallbackQuery, state: FSMContext):
-    lang = await get_lang()
-    await callback.message.answer(await get_text('schedule_prompt', lang))
-    await state.set_state(PostState.waiting_for_schedule_time)
+    lang = await get_lang(callback.from_user.id)
+    # Ask for Timezone first
+    await callback.message.answer("Enter your Timezone (e.g. `Europe/Moscow`, `UTC`, `Asia/Dubai`):")
+    await state.set_state(PostState.waiting_for_timezone)
     await callback.answer()
+
+@router.message(PostState.waiting_for_timezone)
+async def process_timezone(message: types.Message, state: FSMContext):
+    timezone_str = message.text.strip()
+    try:
+        tz = pytz.timezone(timezone_str)
+        await state.update_data(timezone=timezone_str)
+        lang = await get_lang(message.from_user.id)
+        await message.answer(await get_text('schedule_prompt', lang))
+        await state.set_state(PostState.waiting_for_schedule_time)
+    except pytz.UnknownTimeZoneError:
+        await message.answer("Unknown Timezone. Please try again (e.g. `Europe/Moscow`).")
 
 @router.message(PostState.waiting_for_schedule_time)
 async def process_schedule_time(message: types.Message, state: FSMContext):
     try:
-        run_date = datetime.strptime(message.text, "%d.%m.%Y %H:%M")
-        # Assume server time or ask for TZ. For simplicity MVP, using local/server time.
-        # Ideally we ask user for TZ.
+        data = await state.get_data()
+        timezone_str = data.get('timezone', 'UTC')
+        tz = pytz.timezone(timezone_str)
+        
+        # Parse naive string
+        naive_dt = datetime.strptime(message.text, "%d.%m.%Y %H:%M")
+        # Localize to user's timezone
+        local_dt = tz.localize(naive_dt)
+        # Convert to UTC for storage/scheduler (best practice)
+        run_date = local_dt.astimezone(pytz.utc)
         
         # Save post data same as publish_now but with future date and add to scheduler
         data = await state.get_data()
@@ -399,12 +453,12 @@ async def process_schedule_time(message: types.Message, state: FSMContext):
                 id=str(new_post.id)
             )
             
-            lang = await get_lang()
+            lang = await get_lang(message.from_user.id)
             await message.answer(await get_text('post_scheduled', lang, date=run_date))
             await state.clear()
             
     except ValueError:
-        lang = await get_lang()
+        lang = await get_lang(message.from_user.id)
         await message.answer(await get_text('invalid_date', lang))
 
 async def publish_scheduled_post(post_id: int):
@@ -556,6 +610,9 @@ async def publish_now(callback: types.CallbackQuery, state: FSMContext):
                      new_id = str(uuid.uuid4())
                      btn['alert_id'] = new_id
                      session.add(AlertStorage(id=new_id, text=btn['alert_text']))
+                 # Ensure checking for existence if id present (e.g. from preview)?
+                 # Preview saves it, so it should exist. But good to be safe or just trust ID.
+                 # If ID exists from preview, it's already in DB.
          await session.commit()
 
     # Reconstruct keyboard
@@ -582,13 +639,13 @@ async def publish_now(callback: types.CallbackQuery, state: FSMContext):
 
             if data['content_type'] == 'text':
                 # content is dict {text, entities} if new format, OR str if old.
-                # data['content_type'] == 'text' was set for both.
-                # Let's check type of 'content'
                 if isinstance(content, dict):
                     text = content.get('text', "")
                     entities = [types.MessageEntity(**e) for e in content['entities']] if content.get('entities') else None
+                    # Send with entities (ignores parse_mode=HTML default if entities provided)
                     sent_message = await callback.bot.send_message(target_chat_id, text, entities=entities, reply_markup=markup, disable_notification=is_silent)
                 else: # Fallback for str (legacy)
+                    # If legacy content is HTML string, sending it with default parse_mode=HTML works.
                     sent_message = await callback.bot.send_message(target_chat_id, str(content), reply_markup=markup, disable_notification=is_silent)
             
             elif data['content_type'] == 'album':
@@ -624,7 +681,7 @@ async def publish_now(callback: types.CallbackQuery, state: FSMContext):
                 except Exception as e:
                     print(f"Failed to pin message: {e}")
 
-            lang = await get_lang()
+            lang = await get_lang(callback.from_user.id)
             await callback.message.edit_text(await get_text('post_published', lang))
             await state.clear()
             

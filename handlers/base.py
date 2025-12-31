@@ -4,36 +4,102 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy import select
 
 from database.db import get_db_session
-from database.models import Channel, Settings
+from database.models import Channel, Settings, User
 from utils.keyboards import get_main_menu, get_channels_menu
 from utils.states import ChannelState, PostState
 from utils.texts import get_text
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from utils.checks import check_subscription
 
 router = Router()
 
-async def get_lang():
-    # Helper to get global lang, better to cache or use middleware,
-    # but for now query DB
+async def get_lang(user_id: int = None):
+    if not user_id:
+        # Fallback for system messages or unknown user context (unlikely)
+        return 'en'
+        
     async for session in get_db_session():
-        settings = (await session.execute(select(Settings))).scalars().first()
-        return settings.language if settings else 'ru'
-    return 'ru'
+        user = await session.get(User, user_id)
+        if user:
+            return user.language
+    return 'en'
 
 @router.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    lang = await get_lang()
+    user_id = message.from_user.id
+    
+    async for session in get_db_session():
+        user = await session.get(User, user_id)
+        if not user:
+            # New user, ask for language
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🇺🇸 English", callback_data="set_lang_en"),
+                 InlineKeyboardButton(text="🇷🇺 Русский", callback_data="set_lang_ru")]
+            ])
+            await message.answer("🌍 Please choose your language / Пожалуйста, выберите язык:", reply_markup=kb)
+            return
+    
+    # If user exists, SubscriptionFilter will run before this and block if needed.
+    # If we reached here, user is subbed.
+    lang = await get_lang(user_id)
     await message.answer(
         await get_text('start_welcome', lang),
         reply_markup=await get_main_menu(lang)
     )
+
+@router.callback_query(F.data.startswith("set_lang_"))
+async def set_language(callback: types.CallbackQuery):
+    lang_code = callback.data.split("_")[-1]
+    user_id = callback.from_user.id
+    
+    async for session in get_db_session():
+        user = await session.get(User, user_id)
+        if not user:
+            user = User(id=user_id, telegram_id=user_id, language=lang_code)
+            session.add(user)
+        else:
+            user.language = lang_code
+        await session.commit()
+    
+    # SubscriptionFilter will catch next interaction if not subbed.
+    # But for UX, we can check here too or just show welcome.
+    # If we show welcome, next click will trigger filter.
+    # Better to show prompt immediately if not subbed.
+    if not await check_subscription(callback.bot, user_id):
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=await get_text('sub_check_btn', lang_code), url="https://t.me/highprod")],
+            [InlineKeyboardButton(text=await get_text('sub_check_verify', lang_code), callback_data="check_sub")]
+        ])
+        await callback.message.edit_text(await get_text('sub_check_prompt', lang_code), reply_markup=kb)
+        return
+
+    await callback.message.delete()
+    await callback.message.answer(
+        await get_text('start_welcome', lang_code),
+        reply_markup=await get_main_menu(lang_code)
+    )
+
+@router.callback_query(F.data == "check_sub")
+async def verify_subscription(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    lang = await get_lang(user_id)
+    
+    if await check_subscription(callback.bot, user_id):
+        await callback.message.delete()
+        await callback.message.answer(
+            await get_text('start_welcome', lang),
+            reply_markup=await get_main_menu(lang)
+        )
+    else:
+        await callback.answer(await get_text('sub_check_fail', lang), show_alert=True)
 
 @router.message(F.text.in_({"📢 Channels", "📢 Каналы"}))
 async def show_channels(message: types.Message):
     async for session in get_db_session():
         result = await session.execute(select(Channel))
         channels = result.scalars().all()
-        lang = await get_lang()
+        lang = await get_lang(message.from_user.id)
         await message.answer(
             await get_text('channels_list', lang),
             reply_markup=get_channels_menu(channels)
@@ -41,14 +107,14 @@ async def show_channels(message: types.Message):
 
 @router.callback_query(F.data == "add_channel")
 async def start_add_channel(callback: types.CallbackQuery, state: FSMContext):
-    lang = await get_lang()
+    lang = await get_lang(callback.from_user.id)
     await callback.message.answer(await get_text('add_channel_prompt', lang))
     await state.set_state(ChannelState.waiting_for_channel_forward)
     await callback.answer()
 
 @router.message(ChannelState.waiting_for_channel_forward)
 async def process_channel_forward(message: types.Message, state: FSMContext):
-    lang = await get_lang()
+    lang = await get_lang(message.from_user.id)
     if not message.forward_from_chat:
         await message.answer("Please forward a message FROM the channel.") # Keep generic or add translation
         return

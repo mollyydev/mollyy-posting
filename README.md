@@ -32,7 +32,7 @@ A powerful Telegram bot for managing channel posts with advanced features like b
     ```bash
     pip install -r requirements.txt
     ```
-    *(Note: Create `requirements.txt` from the list below if not present: `aiogram`, `sqlalchemy`, `aiosqlite`, `python-dotenv`, `apscheduler`, `deep-translator`, `alembic`)*
+
 
 4.  **Configuration**:
     - Rename `data/.env.example` to `data/.env`.

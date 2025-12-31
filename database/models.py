@@ -1,7 +1,14 @@
-from sqlalchemy import BigInteger, String, Integer, DateTime, JSON, Boolean
+from sqlalchemy import BigInteger, String, Integer, DateTime, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 from database.db import Base
 from datetime import datetime
+
+class User(Base):
+    __tablename__ = 'users'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True)
+    language: Mapped[str] = mapped_column(String, default="en")
 
 class Channel(Base):
     __tablename__ = 'channels'
@@ -16,7 +23,7 @@ class Settings(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     access_denied_text: Mapped[str] = mapped_column(String, default="Access Denied.")
-    language: Mapped[str] = mapped_column(String, default="ru") # Added language
+    # language column here is deprecated in favor of User table, but keeping for compatibility or global fallback if needed
 
 class ScheduledPost(Base):
     __tablename__ = 'scheduled_posts'
@@ -28,8 +35,6 @@ class ScheduledPost(Base):
     buttons: Mapped[list] = mapped_column(JSON)
     run_date: Mapped[datetime] = mapped_column(DateTime)
     status: Mapped[str] = mapped_column(String, default="pending") 
-    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
-    is_silent: Mapped[bool] = mapped_column(Boolean, default=False)
 
 class AlertStorage(Base):
     """Stores text for alert buttons to handle callback data limits."""

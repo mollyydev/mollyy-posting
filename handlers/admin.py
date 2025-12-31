@@ -4,7 +4,7 @@ from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
 
 from database.db import get_db_session
-from database.models import Settings, ScheduledPost, Channel
+from database.models import Settings, ScheduledPost, Channel, User
 from utils.keyboards import get_main_menu
 from utils.texts import get_text
 
@@ -16,7 +16,7 @@ class AdminState(StatesGroup):
 @router.message(F.text.in_({"⚙️ Settings", "⚙️ Настройки"}))
 async def settings_menu(message: types.Message):
     from handlers.base import get_lang
-    lang = await get_lang()
+    lang = await get_lang(message.from_user.id)
     await message.answer(
         await get_text('settings_menu', lang),
         reply_markup=types.InlineKeyboardMarkup(
@@ -30,18 +30,19 @@ async def settings_menu(message: types.Message):
 
 @router.callback_query(F.data == "switch_lang")
 async def switch_language(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
     async for session in get_db_session():
-        result = await session.execute(select(Settings))
-        settings = result.scalars().first()
-        if not settings:
-            settings = Settings()
-            session.add(settings)
+        user = await session.get(User, user_id)
+        if not user:
+            # Should exist if interacting, but just in case
+            user = User(id=user_id, telegram_id=user_id, language='en')
+            session.add(user)
         
-        new_lang = 'en' if settings.language == 'ru' else 'ru'
-        settings.language = new_lang
+        new_lang = 'en' if user.language == 'ru' else 'ru'
+        user.language = new_lang
         await session.commit()
         
-        from handlers.base import get_lang # reload
+        from handlers.base import get_lang
         lang = new_lang
         await callback.message.answer(await get_text('language_selected', lang))
         await callback.message.answer(await get_text('start_welcome', lang), reply_markup=await get_main_menu(lang))
@@ -50,7 +51,7 @@ async def switch_language(callback: types.CallbackQuery):
 @router.callback_query(F.data == "edit_denied_text")
 async def edit_denied_text(callback: types.CallbackQuery, state: FSMContext):
     from handlers.base import get_lang
-    lang = await get_lang()
+    lang = await get_lang(callback.from_user.id)
     await callback.message.answer(await get_text('edit_denied_text', lang))
     await state.set_state(AdminState.waiting_for_denied_text)
     await callback.answer()
@@ -69,7 +70,7 @@ async def save_denied_text(message: types.Message, state: FSMContext):
         await session.commit()
     
     from handlers.base import get_lang
-    lang = await get_lang()
+    lang = await get_lang(message.from_user.id)
     await message.answer(await get_text('denied_updated', lang))
     await state.clear()
 
@@ -82,7 +83,7 @@ async def view_scheduled(callback: types.CallbackQuery):
         
         if not posts:
             from handlers.base import get_lang
-            lang = await get_lang()
+            lang = await get_lang(callback.from_user.id)
             await callback.message.answer(await get_text('no_scheduled', lang))
             await callback.answer()
             return
