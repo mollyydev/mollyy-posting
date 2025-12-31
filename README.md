@@ -15,7 +15,7 @@ A powerful Telegram bot for managing channel posts with advanced features like b
 
 1.  **Clone the repository**:
     ```bash
-    git clone <repository_url>
+    git clone https://github.com/mollyydev/mollyy-posting
     cd mollyy-posting
     ```
 
