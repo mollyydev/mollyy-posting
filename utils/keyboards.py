@@ -26,7 +26,7 @@ def get_post_creation_menu(has_content: bool = False, has_buttons: bool = False)
     if has_content:
         builder.button(text="🔗 Add URL Button", callback_data="add_btn_url")
         builder.button(text="🔔 Add Alert Button", callback_data="add_btn_alert")
-        builder.button(text="🇺🇸 Add Translation", callback_data="add_btn_translate")
+        # builder.button(text="🇺🇸 Add Translation", callback_data="add_btn_translate")
         builder.button(text="❌ Clear Buttons", callback_data="clear_buttons")
         
         builder.button(text="✅ Done / Publish", callback_data="post_done")
