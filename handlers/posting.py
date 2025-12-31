@@ -303,7 +303,8 @@ async def clear_buttons(callback: types.CallbackQuery, state: FSMContext):
 async def post_cancel(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     lang = await get_lang()
-    await callback.message.edit_text(await get_text('start_welcome', lang), reply_markup=await get_main_menu(lang))
+    await callback.message.delete() # Can't edit inline to reply keyboard
+    await callback.message.answer(await get_text('start_welcome', lang), reply_markup=await get_main_menu(lang))
 
 @router.callback_query(F.data == "back_to_edit")
 async def back_to_edit(callback: types.CallbackQuery, state: FSMContext):
